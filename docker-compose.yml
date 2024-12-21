@@ -1,0 +1,122 @@
+version: '3.8'
+
+x-spark-common: &spark-common
+  image: bitnami/spark:latest
+  volumes:
+    - ./jobs:/opt/bitnami/spark/jobs
+    - ./jars/mysql-connector-java-8.0.30.jar:/opt/bitnami/spark/jars/mysql-connector-java-8.0.30.jar  # Mount MySQL driver
+    - ./jars/hadoop-aws-3.2.0.jar:/opt/bitnami/spark/jars/hadoop-aws-3.2.0.jar  # Mount Hadoop AWS JAR
+    - ./jars/aws-java-sdk-bundle-1.11.375.jar:/opt/bitnami/spark/jars/aws-java-sdk-bundle-1.11.375.jar  # Mount AWS SDK JAR
+  networks:
+    - code-with-yu
+  environment:
+    - SPARK_CLASSPATH=/opt/bitnami/spark/jars/mysql-connector-java-8.0.30.jar:/opt/bitnami/spark/jars/hadoop-aws-3.2.0.jar:/opt/bitnami/spark/jars/aws-java-sdk-bundle-1.11.375.jar  # Set classpath for JARs
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - airflow.env
+  volumes:
+    - ./jobs:/opt/airflow/jobs
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./jars:/opt/airflow/jars
+    - ./local_data:/opt/airflow/local_data
+    - ./csv_data:/opt/airflow/local_data/csv_data
+    - ./parquet_data:/opt/airflow/local_data/parquet_data
+  depends_on:
+    - mysql
+  networks:
+    - code-with-yu
+
+services:
+  spark-master:
+    <<: *spark-common
+    container_name: spark-master
+    command: bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "9090:8080"  # Spark Web UI
+      - "7077:7077"  # Spark Master port
+    networks:
+      - code-with-yu
+    volumes:
+      - ./jobs:/opt/bitnami/spark/jobs
+      - ./jars/mysql-connector-java-8.0.30.jar:/opt/bitnami/spark/jars/mysql-connector-java-8.0.30.jar  # Mount MySQL driver
+      - ./jars/hadoop-aws-3.2.0.jar:/opt/bitnami/spark/jars/hadoop-aws-3.2.0.jar  # Mount Hadoop AWS JAR
+      - ./jars/aws-java-sdk-bundle-1.11.375.jar:/opt/bitnami/spark/jars/aws-java-sdk-bundle-1.11.375.jar  # Mount AWS SDK JAR
+      - .secrets:/opt/bitnami/spark/.secrets
+      - ./applications.yml:/opt/bitnami/spark/applications.yml
+
+  spark-worker:
+    <<: *spark-common
+    container_name: spark-worker
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 1g
+      SPARK_MASTER_URL: spark://spark-master:7077
+    networks:
+      - code-with-yu
+    volumes:
+      - ./jobs:/opt/bitnami/spark/jobs
+      - ./jars/mysql-connector-java-8.0.30.jar:/opt/bitnami/spark/jars/mysql-connector-java-8.0.30.jar  # Mount MySQL driver
+      - ./jars/hadoop-aws-3.2.0.jar:/opt/bitnami/spark/jars/hadoop-aws-3.2.0.jar  # Mount Hadoop AWS JAR
+      - ./jars/aws-java-sdk-bundle-1.11.375.jar:/opt/bitnami/spark/jars/aws-java-sdk-bundle-1.11.375.jar  # Mount AWS SDK JAR
+      - .secrets:/opt/bitnami/spark/.secrets
+      - ./applications.yml:/opt/bitnami/spark/applications.yml
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: test_db
+      MYSQL_USER: airflow
+      MYSQL_PASSWORD: airflow_password
+    ports:
+      - "3306:3306"
+    networks:
+      - code-with-yu
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
+      retries: 5
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+
+
+  webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      - scheduler
+    networks:
+      - code-with-yu
+
+  scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: bash -c "airflow db upgrade && \
+                      airflow users create --username admin --firstname Ketan --lastname Hadkar \
+                      --role Admin --email airscholar@gmail.com --password admin && \
+                      airflow scheduler"
+    depends_on:
+      - mysql
+    networks:
+      - code-with-yu
+
+networks:
+  code-with-yu:
+
+volumes:
+  mysql_data:
