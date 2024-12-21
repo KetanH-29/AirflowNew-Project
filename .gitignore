@@ -1,5 +1,3 @@
-.secrets.yml
-.secrets.env
 logs
 logs/scheduler/latest
 .secrets
