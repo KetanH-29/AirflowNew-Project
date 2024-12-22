@@ -120,6 +120,7 @@ def full_load(spark, app_conf, table , app_secret):
 
 def append(spark, app_conf, table, app_secret):
     """Incrementally append data to the S3 bucket or perform a full load if no data exists."""
+    print(f"Loading table: {table}")
 
     # Get today's date for dynamic path generation
     today = datetime.now()
@@ -132,6 +133,7 @@ def append(spark, app_conf, table, app_secret):
 
     source_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "current" + "/" + date_folder
     append_output_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_staging_path"] + table + "/" + "append" + "/"
+    append_current_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "append" + "/" + "current" + "/"
 
     # Fetch the max_date from the source path
     max_date = get_max_date(source_path, spark)
@@ -178,12 +180,54 @@ def append(spark, app_conf, table, app_secret):
                 .withColumn("month", lit(f"{month:02d}")) \
                 .withColumn("day", lit(f"{day:02d}"))
 
-            df1.write.partitionBy("year", "month", "day").parquet(append_output_path, mode="overwrite")
+            df1.write.partitionBy("year", "month", "day").parquet(append_output_path, mode="append")
             print(f"Incremental data written to {append_output_path} for table {table}")
+
+            # Mirror data to append_current_path
+            print(f"Mirroring data from {append_output_path} to {append_current_path}...")
+            df1.write.partitionBy("year", "month", "day").mode("overwrite").parquet(append_current_path)
+            print(f"Data successfully mirrored to {append_current_path} for table {table}")
         except Exception as e:
             print(f"Failed to load data for table {table} using query: {query}. Error: {e}")
     else:
         print(f"Skipping incremental load for table {table} as max_date could not be determined.")
+
+
+def upsert(spark, app_conf, table, app_secret):
+    """Check if data present in current else call append and mirror data from curr to prev.
+    Then run the upsert query on curr and prev """
+    print(f"Loading table: {table}")
+
+    # Get today's date for dynamic path generation
+    today = datetime.now()
+    year = today.year
+    month = today.month
+    day = today.day
+
+    # Define the date-based folder structure
+    date_folder = f"year={year}/month={month:02d}/day={day:02d}/"
+
+    source_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "append" + "/" + "current" + "/"
+    append_prev_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "append" + "/" + "previous" + "/"
+
+    try:
+        # Attempt to read existing data
+        print(f"Trying to read data from {source_path}...")
+        existing_data = spark.read.parquet(source_path)
+        print(f"Data found at {source_path}. Mirroring data to {append_prev_path} with partitioning...")
+
+        # Mirror data from source_path to append_prev_path with partitioning by date
+        existing_data = existing_data.withColumn("year", lit(year)) \
+                                     .withColumn("month", lit(f"{month:02d}")) \
+                                     .withColumn("day", lit(f"{day:02d}"))
+
+        existing_data.write.partitionBy("year", "month", "day").mode("overwrite").parquet(append_prev_path)
+        print(f"Data successfully mirrored from {source_path} to {append_prev_path} with partitioning for table {table}")
+
+    except Exception as e:
+        print(f"No data found at {source_path}. Attempting append for table {table}. Error: {e}")
+        # Call the append function
+        append(spark, app_conf, table, app_secret)
 
 
 def loading_source_data():
@@ -236,6 +280,14 @@ def loading_source_data():
             for table in app_conf["Incremental_append"]["tables"]:
                 # Call the full load function directly
                 append(spark, app_conf, table , app_secret)
+
+        elif tgt == 'Incremental_upsert':
+            print('Performing Incremental_upsert')
+
+            # Loop over the tables and load each one separately
+            for table in app_conf["Incremental_upsert"]["tables"]:
+                # Call the full load function directly
+                append(spark, app_conf, table, app_secret)
 
 
 
