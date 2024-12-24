@@ -211,6 +211,7 @@ def upsert(spark, app_conf, table, app_secret):
     append_prev_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "append" + "/" + "previous" + "/"
     source_path_staging_read = app_conf["Full_load"]["source"]["S3_bucket"]["s3_staging_path"] + table + "/" + date_folder
     append_prev_path_read = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "append" + "/" + "previous" + "/" + date_folder
+    output_upsert_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_staging_path"] + table + "/" + "upsert" + "/"
 
     try:
         # Attempt to read existing data
@@ -250,6 +251,9 @@ def upsert(spark, app_conf, table, app_secret):
             print(f"Data still not found at {source_path} after appending. Skipping mirroring for table {table}. Error: {recheck_error}")
 
     # Additional code for the anti-left join to get new records
+    from pyspark.sql.functions import lit
+    from datetime import datetime
+
     try:
         print(f"Reading staging data from {source_path_staging_read}...")
         staging_df = spark.read.parquet(source_path_staging_read)
@@ -268,10 +272,24 @@ def upsert(spark, app_conf, table, app_secret):
         print(f"New records found in table {table}:")
         new_records_df.show()
 
-        # You can process or save `new_records_df` as needed
-        new_records_path = app_conf["Incremental_upsert"]["new_records_path"] + table + "/" + date_folder
-        new_records_df.write.mode("overwrite").parquet(new_records_path)
-        print(f"New records successfully written to {new_records_path}")
+        # Get today's date for dynamic partitioning
+        today = datetime.now()
+        year = today.year
+        month = today.month
+        day = today.day
+
+        # Add partitioning columns (year, month, day)
+        new_records_df = new_records_df.withColumn("year", lit(year)) \
+            .withColumn("month", lit(f"{month:02d}")) \
+            .withColumn("day", lit(f"{day:02d}"))
+
+        # Define the output path with date-based partitioning
+        output_upsert_path = app_conf["Incremental_append"]["source"]["S3_bucket"][
+                                 "s3_staging_path"] + table + "/" + "upsert" + "/"
+
+        # Write the new records with partitioning by year, month, and day
+        new_records_df.write.partitionBy("year", "month", "day").mode("overwrite").parquet(output_upsert_path)
+        print(f"New records successfully written to {output_upsert_path}")
 
     except Exception as join_error:
         print(f"Error during staging and previous data join for table {table}: {join_error}")
