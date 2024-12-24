@@ -207,13 +207,16 @@ def upsert(spark, app_conf, table, app_secret):
     # Define the date-based folder structure
     date_folder = f"year={year}/month={month:02d}/day={day:02d}/"
 
-    source_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "append" + "/" + "current" + "/"
+    source_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "append" + "/" + "current" + "/" + date_folder
     append_prev_path = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "append" + "/" + "previous" + "/"
+    source_path_staging_read = app_conf["Full_load"]["source"]["S3_bucket"]["s3_staging_path"] + table + "/" + date_folder
+    append_prev_path_read = app_conf["Incremental_append"]["source"]["S3_bucket"]["s3_mirror_path"] + table + "/" + "append" + "/" + "previous" + "/" + date_folder
 
     try:
         # Attempt to read existing data
         print(f"Trying to read data from {source_path}...")
         existing_data = spark.read.parquet(source_path)
+        existing_data.show()
         print(f"Data found at {source_path}. Mirroring data to {append_prev_path} with partitioning...")
 
         # Mirror data from source_path to append_prev_path with partitioning by date
@@ -228,6 +231,50 @@ def upsert(spark, app_conf, table, app_secret):
         print(f"No data found at {source_path}. Attempting append for table {table}. Error: {e}")
         # Call the append function
         append(spark, app_conf, table, app_secret)
+
+        # Recheck if data now exists after appending
+        try:
+            print(f"Rechecking data from {source_path} after appending...")
+            existing_data = spark.read.parquet(source_path)
+            existing_data.show()
+            print(f"Data found at {source_path} after appending. Mirroring to {append_prev_path}...")
+
+            # Mirror data to append_prev_path
+            existing_data = existing_data.withColumn("year", lit(year)) \
+                .withColumn("month", lit(f"{month:02d}")) \
+                .withColumn("day", lit(f"{day:02d}"))
+
+            existing_data.write.partitionBy("year", "month", "day").mode("overwrite").parquet(append_prev_path)
+            print(f"Data successfully mirrored from {source_path} to {append_prev_path} after appending for table {table}")
+        except Exception as recheck_error:
+            print(f"Data still not found at {source_path} after appending. Skipping mirroring for table {table}. Error: {recheck_error}")
+
+    # Additional code for the anti-left join to get new records
+    try:
+        print(f"Reading staging data from {source_path_staging_read}...")
+        staging_df = spark.read.parquet(source_path_staging_read)
+        print(f"Reading previous data from {append_prev_path_read}...")
+        previous_df = spark.read.parquet(append_prev_path_read)
+
+        # Register DataFrames as temporary views
+        staging_df.createOrReplaceTempView("staging")
+        previous_df.createOrReplaceTempView("previous")
+
+        # Fetch the query from the application config
+        query = app_conf["Incremental_upsert"]["loadingQuery"]
+        print(f"Executing the query: {query}")
+        new_records_df = spark.sql(query)
+
+        print(f"New records found in table {table}:")
+        new_records_df.show()
+
+        # You can process or save `new_records_df` as needed
+        new_records_path = app_conf["Incremental_upsert"]["new_records_path"] + table + "/" + date_folder
+        new_records_df.write.mode("overwrite").parquet(new_records_path)
+        print(f"New records successfully written to {new_records_path}")
+
+    except Exception as join_error:
+        print(f"Error during staging and previous data join for table {table}: {join_error}")
 
 
 def loading_source_data():
@@ -263,8 +310,7 @@ def loading_source_data():
 
     tgt_list = app_conf["target_list"]
 
-    for tgt in tgt_list:
-        tgt_conf = app_conf[tgt]
+    for tgt in tgt_list: 
         if tgt == 'Full_load':
             print('Performing full_load')
 
@@ -287,7 +333,7 @@ def loading_source_data():
             # Loop over the tables and load each one separately
             for table in app_conf["Incremental_upsert"]["tables"]:
                 # Call the full load function directly
-                append(spark, app_conf, table, app_secret)
+                upsert(spark, app_conf, table, app_secret)
 
 
 
